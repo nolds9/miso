@@ -1,6 +1,11 @@
 # Saved Posts
 saved_posts.json
 
+# Tier-1 enrich runtime (cookies, Playwright storage, comment cache)
+.miso/
+**/ig-storage.json
+**/cookies.txt
+
 # Logs
 logs
 *.log

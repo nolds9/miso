@@ -444,7 +444,7 @@ The pure core (`transforms.ts`, the `classify.ts` heuristic, `domains/recipe.ts`
 ## 14. Open questions / next steps
 
 1. **`Category` select options.** The one column whose vocabulary the screenshots didn't show (collapsed, empty in the sample). Send its options and the writer populates it; until then it's left unset.
-2. **Comment & audio access for `enrichReel`.** The export has no comments or audio, so escalation needs a fetch path (oEmbed, a logged-in scrape, or `yt-dlp` + Whisper for audio). Decide how far up the ladder is worth building — caption-only may cover most of your saves.
+2. **Comment & audio access for `enrichReel`.** The export has no comments or audio, so escalation needs a fetch path (oEmbed, a logged-in scrape, or `yt-dlp` + Whisper for audio). **Tier 1 (Playwright + Netscape cookies → pinned/first comment) is spec’d in [docs/tier1-playwright-enrichment.md](docs/tier1-playwright-enrichment.md).** Tier 2 (multimodal) remains open.
 3. **Tags semantics.** Tags currently absorbs both effort and meal type. If you'd rather keep those as separate columns, that's a one-column add to the DB and a two-line change to the §9.1 mapping.
 4. **Build order.** `transforms.ts` (parser + mojibake repair) → `notion.ts` (introspect + writer) → `domains/recipe.ts` (gate + extract) → wire `pipeline.ts` → wrap as `SKILL.md`.
 

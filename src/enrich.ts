@@ -5,7 +5,7 @@
 // compiles and runs; the escalation ladder (comment fetch, yt-dlp + Whisper)
 // can be wired in here when needed.
 //
-// To implement:
+// To implement (see docs/tier1-playwright-enrichment.md):
 //   "caption+comment" → fetch the first/pinned comment from the reel URL
 //   "multimodal"      → yt-dlp audio + Whisper transcript + frame OCR
 // ---------------------------------------------------------------------------
