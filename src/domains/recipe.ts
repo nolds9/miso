@@ -1,15 +1,25 @@
 // ---------------------------------------------------------------------------
 // domains/recipe.ts — gate + extract DomainExtractor for recipes
 //
-// Tier-0: gemini-2.5-flash (cheap, caption-only)
-// Tier-2: claude-sonnet-4  (escalation, richer context — stub for now)
+// Both tiers run through Nous Portal's OpenAI-compatible endpoint:
+//   https://inference-api.nousresearch.com/v1/chat/completions
 //
+// Tier-0: google/gemini-3-flash-preview  (cheap, caption-only)
+// Tier-2: anthropic/claude-sonnet-4.6    (escalation, richer context — stub)
+//
+// Auth: NOUS_API_KEY in .env (get from portal.nousresearch.com)
 // The heuristic pre-gate fires first so non-recipe reels never reach the model.
 // ---------------------------------------------------------------------------
 
-import type { Reel, Extraction, ExtractRecipe, CuisineType, MealType, Effort, Ingredient } from "../ports.ts";
+import type { Reel, Extraction, ExtractRecipe } from "../ports.ts";
 import { CUISINE_TYPES } from "../ports.ts";
 import { ok, err } from "../result.ts";
+
+// ── Model slugs ────────────────────────────────────────────────────────────
+
+const TIER0_MODEL    = "google/gemini-3-flash-preview";   // fast + cheap
+const TIER2_MODEL    = "anthropic/claude-sonnet-4.6";     // escalation
+const NOUS_BASE_URL  = "https://inference-api.nousresearch.com/v1";
 
 // ── Cheap heuristic pre-gate ───────────────────────────────────────────────
 // Returns true when the caption / hashtags contain strong recipe signals.
@@ -20,27 +30,18 @@ const RECIPE_HASHTAGS = new Set([
   "quickrecipe", "dinnerrecipe", "lunchrecipe", "breakfastrecipe",
 ]);
 
-const MEASUREMENT_RE = /\b\d+\s*(tbsp|tsp|cup|oz|lb|g|kg|ml|clove|inch|cm)\b/i;
+const MEASUREMENT_RE   = /\b\d+\s*(tbsp|tsp|cup|oz|lb|g|kg|ml|clove|inch|cm)\b/i;
 const RECIPE_HEADER_RE = /\b(ingredients?|steps?|instructions?|method|directions?)\b/i;
 
 export const hasRecipeSignal = (reel: Reel): boolean => {
   const captionLower = reel.caption.toLowerCase();
-
-  // Strong: explicit recipe header in caption
   if (RECIPE_HEADER_RE.test(captionLower)) return true;
-
-  // Strong: measurement units (e.g. "2 tbsp butter")
-  if (MEASUREMENT_RE.test(captionLower)) return true;
-
-  // Moderate: any recipe-tagged hashtag
+  if (MEASUREMENT_RE.test(captionLower))   return true;
   if (reel.hashtags.some((h) => RECIPE_HASHTAGS.has(h.toLowerCase()))) return true;
-
   return false;
 };
 
-// ── Gemini tier-0 extractor ────────────────────────────────────────────────
-
-const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+// ── Shared system prompt ───────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are a recipe extraction assistant. Analyze the Instagram reel caption and hashtags provided and determine if it contains a recipe.
 
@@ -62,7 +63,7 @@ If it IS a recipe:
     "servings": number|null,
     "nutrition": { "calories": number|null, "proteinG": number|null, "fatG": number|null, "carbsG": number|null } | null,
     "sourceTier": "caption",
-    "confidence": number (0.0–1.0, your completeness rating)
+    "confidence": number (0.0-1.0, your completeness rating)
   }
 }
 
@@ -70,7 +71,7 @@ If the caption mentions a recipe exists but lacks ingredients/steps (e.g. "comme
 {
   "kind": "partial",
   "recipe": { ...same shape, fill what you can... },
-  "missing": ["ingredients", "steps"]  (list what's absent)
+  "missing": ["ingredients", "steps"]
 }
 
 If it is NOT a recipe (restaurant review, travel, workout, etc.):
@@ -84,74 +85,37 @@ Rules:
 - confidence 1.0 = all fields populated from explicit text; 0.6 = guessed from context; 0.0 = no usable content.
 - Do NOT wrap the JSON in markdown fences.`;
 
-const callGemini = async (
-  caption: string,
-  hashtags: readonly string[],
-  apiKey: string,
-): Promise<Extraction> => {
-  const userContent = `Caption:\n${caption}\n\nHashtags: ${hashtags.map((h) => `#${h}`).join(" ")}`;
+// ── Shared OpenAI-compatible caller (Nous Portal endpoint) ─────────────────
 
-  const body = {
-    contents: [{ role: "user", parts: [{ text: userContent }] }],
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 2048,
-      responseMimeType: "application/json",
-    },
-  };
-
-  const resp = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Gemini API error ${resp.status}: ${text.slice(0, 200)}`);
-  }
-
-  const data = (await resp.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-  };
-
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-  const parsed: unknown = JSON.parse(text);
-  return parsed as Extraction;
-};
-
-// ── Claude tier-2 escalation ───────────────────────────────────────────────
-// Called only when the reel is gated as recipe-but-partial after enrichment.
-// Stub: just re-runs the Gemini model since EnrichReel is a no-op anyway.
-
-const callClaude = async (
+const callNous = async (
+  model: string,
   caption: string,
   hashtags: readonly string[],
   extraContext: string,
   apiKey: string,
 ): Promise<Extraction> => {
-  const userContent = [
+  const userParts = [
     `Caption:\n${caption}`,
     `Hashtags: ${hashtags.map((h) => `#${h}`).join(" ")}`,
-    extraContext ? `Additional context:\n${extraContext}` : "",
-  ].filter(Boolean).join("\n\n");
+    ...(extraContext ? [`Additional context:\n${extraContext}`] : []),
+  ];
 
   const body = {
-    model: "claude-sonnet-4-5",
-    max_tokens: 2048,
+    model,
     temperature: 0.1,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: "user", content: userContent }],
+    max_tokens: 2048,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system",  content: SYSTEM_PROMPT },
+      { role: "user",    content: userParts.join("\n\n") },
+    ],
   };
 
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+  const resp = await fetch(`${NOUS_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(45_000),
@@ -159,25 +123,23 @@ const callClaude = async (
 
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`Claude API error ${resp.status}: ${text.slice(0, 200)}`);
+    throw new Error(`Nous API error ${resp.status} (${model}): ${text.slice(0, 300)}`);
   }
 
   const data = (await resp.json()) as {
-    content?: { type: string; text?: string }[];
+    choices?: { message?: { content?: string } }[];
   };
 
-  const text = data.content?.find((c) => c.type === "text")?.text ?? "";
-  // Strip markdown fences if Claude wraps despite the instruction
-  const clean = text.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
-  const parsed: unknown = JSON.parse(clean);
-  return parsed as Extraction;
+  const raw = data.choices?.[0]?.message?.content ?? "";
+  // Strip markdown fences defensively (some models add them despite json_object)
+  const clean = raw.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
+  return JSON.parse(clean) as Extraction;
 };
 
 // ── Public ExtractRecipe port ──────────────────────────────────────────────
 
 export const makeExtractRecipe = (config: {
-  geminiApiKey: string;
-  anthropicApiKey: string;
+  nousApiKey: string;
   escalationCap: number;
 }): ExtractRecipe => async (reel: Reel) => {
   // Step 1: heuristic pre-gate (free, no model call)
@@ -185,12 +147,18 @@ export const makeExtractRecipe = (config: {
     return ok({ kind: "no-recipe", reason: "No recipe signal in caption or hashtags" });
   }
 
-  // Step 2: tier-0 Gemini extraction
+  // Step 2: tier-0 extraction via Gemini Flash on Nous Portal
   try {
-    const extraction = await callGemini(reel.caption, reel.hashtags, config.geminiApiKey);
+    const extraction = await callNous(
+      TIER0_MODEL,
+      reel.caption,
+      reel.hashtags,
+      "",
+      config.nousApiKey,
+    );
 
-    // If partial and we have enriched context, try Claude (escalation)
-    // EnrichReel is a no-op stub for now, so this path is never triggered in practice.
+    // Step 3: if partial + enriched context available, escalate to Claude Sonnet
+    // EnrichReel is a no-op stub for now so this path never fires in practice.
     if (
       extraction.kind === "partial" &&
       config.escalationCap > 0 &&
@@ -203,15 +171,16 @@ export const makeExtractRecipe = (config: {
       ].filter(Boolean).join("\n");
 
       try {
-        const escalated = await callClaude(
+        const escalated = await callNous(
+          TIER2_MODEL,
           reel.caption,
           reel.hashtags,
           extraContext,
-          config.anthropicApiKey,
+          config.nousApiKey,
         );
         return ok(escalated);
       } catch {
-        // Escalation failed → return the partial result from tier-0
+        // Escalation failed — return the partial result from tier-0
         return ok(extraction);
       }
     }
@@ -221,3 +190,6 @@ export const makeExtractRecipe = (config: {
     return err(e instanceof Error ? e : new Error(String(e)));
   }
 };
+
+
+

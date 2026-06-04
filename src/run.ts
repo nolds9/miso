@@ -97,8 +97,7 @@ const main = async (): Promise<void> => {
   const missing: string[] = [];
   if (!config.notionDatabaseId)  missing.push("NOTION_DATABASE_ID / NOTION_PARENT_PAGE_ID");
   if (!config.notionDataSourceId) missing.push("NOTION_DATA_SOURCE_ID");
-  if (!config.geminiApiKey)       missing.push("GEMINI_API_KEY");
-  if (!config.anthropicApiKey)    missing.push("ANTHROPIC_API_KEY");
+  if (!config.nousApiKey)           missing.push("NOUS_API_KEY");
   if (missing.length > 0) {
     console.error("Missing required env vars:");
     for (const m of missing) console.error(`  • ${m}`);
@@ -121,8 +120,7 @@ const main = async (): Promise<void> => {
     readExport,
     existingSourceUrls : makeExistingSourceUrls(notion, config.notionDataSourceId),
     extractRecipe      : makeExtractRecipe({
-      geminiApiKey     : config.geminiApiKey,
-      anthropicApiKey  : config.anthropicApiKey,
+      nousApiKey       : config.nousApiKey,
       escalationCap    : config.escalationCap,
     }),
     enrichReel,
