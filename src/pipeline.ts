@@ -14,6 +14,7 @@ import type {
   WriteRecipe,
   NotionVocab,
   Reel,
+  Recipe,
   RunReport,
   ReelOutcome,
   ExtractionTier,
@@ -37,22 +38,169 @@ export type PipelineDeps = {
   readonly exportPath: string;
 };
 
+const recordRecipe = (
+  outcomes: ReelOutcome[],
+  url: string,
+  recipe: Recipe,
+): void => {
+  outcomes.push({
+    kind: "written",
+    url,
+    name: recipe.name,
+    tier: recipe.sourceTier,
+    cuisine: recipe.cuisine,
+    mealType: recipe.mealType,
+  });
+};
+
+// Classify + optionally write each reel (shared by full, dry, and census runs).
+const classifyReels = async (
+  reels: readonly Reel[],
+  deps: PipelineDeps,
+  outcomes: ReelOutcome[],
+  proposedNew: string[],
+): Promise<void> => {
+  const skipWrite = deps.censusOnly || deps.dryRun;
+  const extractLimit = pLimit(deps.concurrencyExtract);
+  const writeLimit   = pLimit(deps.concurrencyWrite);
+  const pageMapper   = toNotionPage(deps.databaseId, deps.vocab, proposedNew);
+
+  let done = 0;
+  const logProgress = (): void => {
+    if (!deps.censusOnly) return;
+    done++;
+    if (done % 25 === 0 || done === reels.length) {
+      console.log(`  Classified ${done}/${reels.length}…`);
+    }
+  };
+
+  await Promise.all(
+    reels.map((reel) =>
+      extractLimit(async () => {
+        try {
+          const extractResult = await deps.extractRecipe(reel);
+          if (!extractResult.ok) {
+            outcomes.push({
+              kind: "failed",
+              url: reel.url,
+              stage: "extract",
+              message: extractResult.error.message,
+            });
+            return;
+          }
+
+          const extraction = extractResult.value;
+
+          if (extraction.kind === "partial") {
+            const enrichResult = await deps.enrichReel(reel, "caption+comment");
+            if (!enrichResult.ok) {
+              outcomes.push({
+                kind: "partial",
+                url: reel.url,
+                missing: extraction.missing,
+              });
+              return;
+            }
+
+            const enriched = enrichResult.value;
+            const hasNewContext =
+              enriched.firstComment !== reel.firstComment ||
+              enriched.transcript   !== reel.transcript   ||
+              enriched.onScreenText !== reel.onScreenText;
+
+            if (!hasNewContext) {
+              outcomes.push({
+                kind: "partial",
+                url: reel.url,
+                missing: extraction.missing,
+              });
+              return;
+            }
+
+            const reExtract = await deps.extractRecipe(enriched);
+            if (!reExtract.ok || reExtract.value.kind !== "recipe") {
+              outcomes.push({
+                kind: "partial",
+                url: reel.url,
+                missing: extraction.missing,
+              });
+              return;
+            }
+
+            const recipe = reExtract.value.recipe;
+            if (skipWrite) {
+              recordRecipe(outcomes, reel.url, recipe);
+              return;
+            }
+
+            const page = pageMapper(enriched, recipe);
+            const writeResult = await writeLimit(() => deps.writeRecipe(page));
+            if (!writeResult.ok) {
+              outcomes.push({
+                kind: "failed",
+                url: reel.url,
+                stage: "write",
+                message: writeResult.error.message,
+              });
+              return;
+            }
+            recordRecipe(outcomes, reel.url, recipe);
+            return;
+          }
+
+          if (extraction.kind === "no-recipe") {
+            outcomes.push({
+              kind: "no-recipe",
+              url: reel.url,
+              reason: extraction.reason,
+            });
+            return;
+          }
+
+          const recipe = extraction.recipe;
+          if (skipWrite) {
+            recordRecipe(outcomes, reel.url, recipe);
+            return;
+          }
+
+          const page = pageMapper(reel, recipe);
+          const writeResult = await writeLimit(() => deps.writeRecipe(page));
+          if (!writeResult.ok) {
+            outcomes.push({
+              kind: "failed",
+              url: reel.url,
+              stage: "write",
+              message: writeResult.error.message,
+            });
+            return;
+          }
+          recordRecipe(outcomes, reel.url, recipe);
+        } finally {
+          logProgress();
+        }
+      }),
+    ),
+  );
+};
+
 export const runPipeline = async (deps: PipelineDeps): Promise<RunReport> => {
   const start = Date.now();
   const outcomes: ReelOutcome[] = [];
   const proposedNew: string[] = [];
 
-  // 1. Read + parse export ─────────────────────────────────────────────────
   const exportResult = await deps.readExport(deps.exportPath);
   if (!exportResult.ok) {
     throw new Error(`Failed to read export: ${exportResult.error.message}`);
   }
-  const entries = exportResult.value;
 
-  // 2. Normalize (pure) ────────────────────────────────────────────────────
-  const reels: Reel[] = entries.map(normalizeReel);
+  const reels: Reel[] = exportResult.value.map(normalizeReel);
 
-  // 3. Dedup against existing Notion pages ─────────────────────────────────
+  // Census: classify every reel in the export (no Notion dedup or writes).
+  if (deps.censusOnly) {
+    await classifyReels(reels, deps, outcomes, proposedNew);
+    return buildReport(start, reels.length, outcomes, proposedNew);
+  }
+
   const seen = await deps.existingSourceUrls();
   const fresh = reels.filter(
     (r) => !seen.has(r.reelId) && !seen.has(r.url),
@@ -64,129 +212,7 @@ export const runPipeline = async (deps: PipelineDeps): Promise<RunReport> => {
     }
   }
 
-  // Census mode: stop here, report domain distribution
-  if (deps.censusOnly) {
-    return buildReport(start, reels.length, outcomes, proposedNew);
-  }
-
-  // 4. Extract + write (bounded concurrency) ───────────────────────────────
-  const extractLimit = pLimit(deps.concurrencyExtract);
-  const writeLimit   = pLimit(deps.concurrencyWrite);
-  const pageMapper   = toNotionPage(deps.databaseId, deps.vocab, proposedNew);
-
-  await Promise.all(
-    fresh.map((reel) =>
-      extractLimit(async () => {
-        // 4a. Extract (tier-0: Gemini)
-        const extractResult = await deps.extractRecipe(reel);
-        if (!extractResult.ok) {
-          outcomes.push({
-            kind: "failed",
-            url: reel.url,
-            stage: "extract",
-            message: extractResult.error.message,
-          });
-          return;
-        }
-
-        const extraction = extractResult.value;
-
-        // 4b. Handle partial → enrichReel (stub) → re-extract if enriched
-        if (extraction.kind === "partial") {
-          // Try enrichment once (stub returns reel unchanged)
-          const enrichResult = await deps.enrichReel(reel, "caption+comment");
-          if (!enrichResult.ok) {
-            outcomes.push({
-              kind: "partial",
-              url: reel.url,
-              missing: extraction.missing,
-            });
-            return;
-          }
-
-          const enriched = enrichResult.value;
-          const hasNewContext =
-            enriched.firstComment !== reel.firstComment ||
-            enriched.transcript   !== reel.transcript   ||
-            enriched.onScreenText !== reel.onScreenText;
-
-          if (!hasNewContext) {
-            // Stub returned unchanged reel — record partial, skip write
-            outcomes.push({
-              kind: "partial",
-              url: reel.url,
-              missing: extraction.missing,
-            });
-            return;
-          }
-
-          // Re-extract with enriched context (bounded escalation)
-          const reExtract = await deps.extractRecipe(enriched);
-          if (!reExtract.ok || reExtract.value.kind !== "recipe") {
-            outcomes.push({
-              kind: "partial",
-              url: reel.url,
-              missing: extraction.missing,
-            });
-            return;
-          }
-
-          // Fall through with the re-extracted recipe
-          const page = pageMapper(enriched, reExtract.value.recipe);
-          if (!deps.dryRun) {
-            const writeResult = await writeLimit(() => deps.writeRecipe(page));
-            if (!writeResult.ok) {
-              outcomes.push({
-                kind: "failed",
-                url: reel.url,
-                stage: "write",
-                message: writeResult.error.message,
-              });
-              return;
-            }
-          }
-          outcomes.push({
-            kind: "written",
-            url: reel.url,
-            name: reExtract.value.recipe.name,
-            tier: reExtract.value.recipe.sourceTier,
-          });
-          return;
-        }
-
-        if (extraction.kind === "no-recipe") {
-          outcomes.push({
-            kind: "no-recipe",
-            url: reel.url,
-            reason: extraction.reason,
-          });
-          return;
-        }
-
-        // 4c. recipe → map to Notion page → write
-        const page = pageMapper(reel, extraction.recipe);
-        if (!deps.dryRun) {
-          const writeResult = await writeLimit(() => deps.writeRecipe(page));
-          if (!writeResult.ok) {
-            outcomes.push({
-              kind: "failed",
-              url: reel.url,
-              stage: "write",
-              message: writeResult.error.message,
-            });
-            return;
-          }
-        }
-        outcomes.push({
-          kind: "written",
-          url: reel.url,
-          name: extraction.recipe.name,
-          tier: extraction.recipe.sourceTier,
-        });
-      }),
-    ),
-  );
-
+  await classifyReels(fresh, deps, outcomes, proposedNew);
   return buildReport(start, reels.length, outcomes, proposedNew);
 };
 
@@ -213,6 +239,8 @@ const buildReport = (
       case "written":
         written++;
         tierTally[o.tier] = (tierTally[o.tier] ?? 0) + 1;
+        cuisineTally[o.cuisine] = (cuisineTally[o.cuisine] ?? 0) + 1;
+        mealTypeTally[o.mealType] = (mealTypeTally[o.mealType] ?? 0) + 1;
         break;
       case "duplicate": duplicate++; break;
       case "no-recipe": noRecipe++;  break;

@@ -42,6 +42,13 @@ export const introspectVocab = async (
     },
   );
   const ds = (await resp.json()) as Record<string, unknown>;
+  if (!resp.ok || ds["object"] === "error") {
+    const msg =
+      typeof ds["message"] === "string"
+        ? ds["message"]
+        : `Notion data source request failed (${resp.status})`;
+    throw new Error(`introspectVocab: ${msg}`);
+  }
 
   const props = (ds["properties"] ?? {}) as Record<
     string,
@@ -165,10 +172,21 @@ export const makeExistingSourceUrls = (
       },
     );
     const data = (await resp.json()) as {
-      results: { properties?: { URL?: { url?: string | null } } }[];
+      object?: string;
+      message?: string;
+      results?: { properties?: { URL?: { url?: string | null } } }[];
       next_cursor: string | null;
       has_more: boolean;
     };
+
+    if (!resp.ok || data.object === "error") {
+      throw new Error(
+        data.message ?? `Notion data source query failed (${resp.status})`,
+      );
+    }
+    if (!Array.isArray(data.results)) {
+      throw new Error("Notion data source query returned no results array");
+    }
 
     for (const row of data.results) {
       const url = row.properties?.["URL"]?.url;

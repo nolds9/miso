@@ -165,7 +165,14 @@ export type ToNotionPage  = (databaseId: string, vocab: NotionVocab) => (reel: R
 // ── Run report ─────────────────────────────────────────────────────────────
 
 export type ReelOutcome =
-  | { readonly kind: "written";   readonly url: string; readonly name: string; readonly tier: ExtractionTier }
+  | {
+      readonly kind: "written";
+      readonly url: string;
+      readonly name: string;
+      readonly tier: ExtractionTier;
+      readonly cuisine: CuisineType;
+      readonly mealType: MealType;
+    }
   | { readonly kind: "duplicate"; readonly url: string }
   | { readonly kind: "no-recipe"; readonly url: string; readonly reason: string }
   | { readonly kind: "partial";   readonly url: string; readonly missing: readonly string[] }

@@ -31,23 +31,55 @@ const parseArgs = (argv: string[]): { dryRun: boolean; censusOnly: boolean } => 
   censusOnly : argv.includes("--census"),
 });
 
-const renderReport = (report: RunReport, dryRun: boolean): string => {
+const renderTally = (
+  lines: string[],
+  title: string,
+  tally: Record<string, number>,
+): void => {
+  const entries = Object.entries(tally)
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return;
+  lines.push("");
+  lines.push(`  ${title}:`);
+  for (const [label, count] of entries) {
+    lines.push(`    ${label.padEnd(22)} ${count}`);
+  }
+};
+
+const renderReport = (
+  report: RunReport,
+  dryRun: boolean,
+  censusOnly: boolean,
+): string => {
   const lines: string[] = [];
   const hr = "─".repeat(52);
 
   lines.push("");
-  lines.push("  Miso — Recipe Extraction Report");
+  lines.push(
+    censusOnly
+      ? "  Miso — Recipe Census (classify export, no writes)"
+      : "  Miso — Recipe Extraction Report",
+  );
   lines.push(`  ${hr}`);
   lines.push(`  Total reels in export  : ${report.total}`);
-  lines.push(`  Already in Notion      : ${report.duplicate}`);
+
+  if (!censusOnly) {
+    lines.push(`  Already in Notion      : ${report.duplicate}`);
+  }
+
   lines.push(`  No recipe detected     : ${report.noRecipe}`);
   lines.push(`  Partial (incomplete)   : ${report.partial}`);
   lines.push(`  Failed                 : ${report.failed}`);
-  if (dryRun) {
+
+  if (censusOnly) {
+    lines.push(`  Recipes detected       : ${report.written}`);
+  } else if (dryRun) {
     lines.push(`  Would write (dry run)  : ${report.written}`);
   } else {
     lines.push(`  Written to Notion      : ${report.written}`);
   }
+
   lines.push(`  Duration               : ${(report.durationMs / 1000).toFixed(1)}s`);
 
   if (report.written > 0) {
@@ -57,6 +89,9 @@ const renderReport = (report: RunReport, dryRun: boolean): string => {
       if (count > 0) lines.push(`    ${tier.padEnd(20)} ${count}`);
     }
   }
+
+  renderTally(lines, "By cuisine", report.cuisineTally);
+  renderTally(lines, "By meal type", report.mealTypeTally);
 
   if (report.proposedNewValues.length > 0) {
     lines.push("");
@@ -135,7 +170,7 @@ const main = async (): Promise<void> => {
     exportPath         : config.exportPath,
   });
 
-  console.log(renderReport(report, config.dryRun));
+  console.log(renderReport(report, config.dryRun, config.censusOnly));
   process.exit(report.failed > 0 ? 2 : 0);
 };
 
