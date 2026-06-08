@@ -21,6 +21,11 @@ import type {
 } from "./ports.ts";
 import { normalizeReel } from "./transforms.ts";
 import { toNotionPage } from "./notion.ts";
+import {
+  shouldSkipCommentEnrich,
+  skipEnrichReason,
+} from "./enrich/skip-enrich.ts";
+import { EnrichError } from "./enrich/types.ts";
 
 export type PipelineDeps = {
   readonly readExport: ReadExport;
@@ -92,12 +97,26 @@ const classifyReels = async (
           const extraction = extractResult.value;
 
           if (extraction.kind === "partial") {
+            if (shouldSkipCommentEnrich(reel)) {
+              outcomes.push({
+                kind: "partial",
+                url: reel.url,
+                missing: extraction.missing,
+                note: skipEnrichReason(reel),
+              });
+              return;
+            }
+
             const enrichResult = await deps.enrichReel(reel, "caption+comment");
             if (!enrichResult.ok) {
               outcomes.push({
                 kind: "partial",
                 url: reel.url,
                 missing: extraction.missing,
+                note:
+                  enrichResult.error instanceof EnrichError
+                    ? enrichResult.error.code
+                    : enrichResult.error.message,
               });
               return;
             }
@@ -113,6 +132,9 @@ const classifyReels = async (
                 kind: "partial",
                 url: reel.url,
                 missing: extraction.missing,
+                note: shouldSkipCommentEnrich(reel)
+                  ? skipEnrichReason(reel)
+                  : "enrich_no_new_context",
               });
               return;
             }
@@ -123,6 +145,7 @@ const classifyReels = async (
                 kind: "partial",
                 url: reel.url,
                 missing: extraction.missing,
+                note: reExtract.ok ? "still_partial_after_enrich" : "re_extract_failed",
               });
               return;
             }

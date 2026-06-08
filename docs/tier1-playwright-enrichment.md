@@ -1,6 +1,6 @@
 # Tier 1 enrichment: Playwright + Instagram cookies
 
-**Status:** spec (not implemented)  
+**Status:** implemented  
 **Relates to:** [architecture.md §8 — Gate & escalation ladder](../architecture.md#8-the-gate--escalation-ladder)  
 **Port:** `EnrichReel` in `src/ports.ts` · stub in `src/enrich.ts`
 

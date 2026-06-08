@@ -11,7 +11,7 @@
 
 import "dotenv/config";
 
-import { loadConfig } from "./config.ts";
+import { loadConfig, loadEnrichConfig } from "./config.ts";
 import { readExport } from "./transforms.ts";
 import {
   makeNotionClient,
@@ -20,7 +20,7 @@ import {
   makeWriteRecipe,
 } from "./notion.ts";
 import { makeExtractRecipe } from "./domains/recipe.ts";
-import { enrichReel } from "./enrich.ts";
+import { makeEnrichReel, enrichReelFromFactory } from "./enrich.ts";
 import { runPipeline } from "./pipeline.ts";
 import type { RunReport, ReelOutcome } from "./ports.ts";
 
@@ -113,6 +113,21 @@ const renderReport = (
     }
   }
 
+  const partials = report.outcomes.filter(
+    (o): o is Extract<ReelOutcome, { kind: "partial" }> => o.kind === "partial",
+  );
+  const withNotes = partials.filter((p) => p.note);
+  if (withNotes.length > 0 && withNotes.length <= 15) {
+    lines.push("");
+    lines.push("  Partial notes (sample):");
+    for (const p of withNotes.slice(0, 15)) {
+      lines.push(`    ${p.note} — ${p.url}`);
+    }
+  } else if (withNotes.length > 15) {
+    lines.push("");
+    lines.push(`  Partial with notes: ${withNotes.length} (re-run with logging for full list)`);
+  }
+
   lines.push("");
   return lines.join("\n");
 };
@@ -149,26 +164,37 @@ const main = async (): Promise<void> => {
 
   console.log(`  Cuisine options : ${[...vocab.cuisineType].join(", ")}`);
   console.log(`  Tag options     : ${[...vocab.tags].join(", ")}`);
+
+  const enrichConfig = loadEnrichConfig();
+  const enrichFactory = makeEnrichReel(enrichConfig);
+  console.log(
+    `Enrich (Tier 1): ${enrichConfig.enabled ? `on · ${enrichConfig.storagePath}` : "off"}`,
+  );
   console.log("Running pipeline…\n");
 
-  const report = await runPipeline({
-    readExport,
-    existingSourceUrls : makeExistingSourceUrls(notion, config.notionDataSourceId),
-    extractRecipe      : makeExtractRecipe({
-      nousApiKey       : config.nousApiKey,
-      escalationCap    : config.escalationCap,
-    }),
-    enrichReel,
-    writeRecipe        : makeWriteRecipe(notion),
-    vocab,
-    databaseId         : config.notionDatabaseId,
-    concurrencyExtract : config.concurrencyExtract,
-    concurrencyWrite   : config.concurrencyWrite,
-    escalationCap      : config.escalationCap,
-    dryRun             : config.dryRun,
-    censusOnly         : config.censusOnly,
-    exportPath         : config.exportPath,
-  });
+  let report;
+  try {
+    report = await runPipeline({
+      readExport,
+      existingSourceUrls : makeExistingSourceUrls(notion, config.notionDataSourceId),
+      extractRecipe      : makeExtractRecipe({
+        nousApiKey       : config.nousApiKey,
+        escalationCap    : config.escalationCap,
+      }),
+      enrichReel         : enrichReelFromFactory(enrichFactory),
+      writeRecipe        : makeWriteRecipe(notion),
+      vocab,
+      databaseId         : config.notionDatabaseId,
+      concurrencyExtract : config.concurrencyExtract,
+      concurrencyWrite   : config.concurrencyWrite,
+      escalationCap      : config.escalationCap,
+      dryRun             : config.dryRun,
+      censusOnly         : config.censusOnly,
+      exportPath         : config.exportPath,
+    });
+  } finally {
+    await enrichFactory.dispose();
+  }
 
   console.log(renderReport(report, config.dryRun, config.censusOnly));
   process.exit(report.failed > 0 ? 2 : 0);

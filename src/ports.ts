@@ -175,7 +175,12 @@ export type ReelOutcome =
     }
   | { readonly kind: "duplicate"; readonly url: string }
   | { readonly kind: "no-recipe"; readonly url: string; readonly reason: string }
-  | { readonly kind: "partial";   readonly url: string; readonly missing: readonly string[] }
+  | {
+      readonly kind: "partial";
+      readonly url: string;
+      readonly missing: readonly string[];
+      readonly note?: string;
+    }
   | { readonly kind: "failed";    readonly url: string; readonly stage: string; readonly message: string };
 
 export type RunReport = {

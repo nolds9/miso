@@ -155,7 +155,6 @@ export const makeExistingSourceUrls = (
 
   do {
     const body: Record<string, unknown> = {
-      filter_properties: ["URL"],
       ...(cursor ? { start_cursor: cursor } : {}),
     };
 

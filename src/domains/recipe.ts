@@ -32,12 +32,19 @@ const RECIPE_HASHTAGS = new Set([
 
 const MEASUREMENT_RE   = /\b\d+\s*(tbsp|tsp|cup|oz|lb|g|kg|ml|clove|inch|cm)\b/i;
 const RECIPE_HEADER_RE = /\b(ingredients?|steps?|instructions?|method|directions?)\b/i;
+const COMMENT_RECIPE_RE = /\bcomment\b[^\n]{0,48}\brecipe\b/i;
+const LINK_IN_BIO_RE    = /\blink\s+in\s+bio\b/i;
 
 export const hasRecipeSignal = (reel: Reel): boolean => {
   const captionLower = reel.caption.toLowerCase();
   if (RECIPE_HEADER_RE.test(captionLower)) return true;
   if (MEASUREMENT_RE.test(captionLower))   return true;
   if (reel.hashtags.some((h) => RECIPE_HASHTAGS.has(h.toLowerCase()))) return true;
+  // "Comment RECIPE" / link-in-bio teasers — still recipe intent, model returns partial
+  if (COMMENT_RECIPE_RE.test(captionLower)) return true;
+  if (LINK_IN_BIO_RE.test(captionLower) && /\brecipe\b/i.test(captionLower)) {
+    return true;
+  }
   return false;
 };
 
@@ -87,53 +94,92 @@ Rules:
 
 // ── Shared OpenAI-compatible caller (Nous Portal endpoint) ─────────────────
 
+const RETRYABLE_STATUS = new Set([429, 502, 503]);
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, ms));
+
+const applySourceTier = (
+  extraction: Extraction,
+  tier: import("../ports.ts").ExtractionTier,
+): Extraction => {
+  if (extraction.kind === "no-recipe") return extraction;
+  return {
+    ...extraction,
+    recipe: { ...extraction.recipe, sourceTier: tier },
+  };
+};
+
+const buildUserContent = (
+  reel: Reel,
+  extraContext: string,
+): string => {
+  const parts = [
+    `Caption:\n${reel.caption}`,
+    `Hashtags: ${reel.hashtags.map((h) => `#${h}`).join(" ")}`,
+  ];
+  if (reel.firstComment) {
+    parts.push(`First/pinned comment:\n${reel.firstComment}`);
+  }
+  if (extraContext) {
+    parts.push(`Additional context:\n${extraContext}`);
+  }
+  return parts.join("\n\n");
+};
+
 const callNous = async (
   model: string,
-  caption: string,
-  hashtags: readonly string[],
+  reel: Reel,
   extraContext: string,
   apiKey: string,
+  sourceTier: import("../ports.ts").ExtractionTier = "caption",
 ): Promise<Extraction> => {
-  const userParts = [
-    `Caption:\n${caption}`,
-    `Hashtags: ${hashtags.map((h) => `#${h}`).join(" ")}`,
-    ...(extraContext ? [`Additional context:\n${extraContext}`] : []),
-  ];
-
   const body = {
     model,
     temperature: 0.1,
     max_tokens: 2048,
     response_format: { type: "json_object" },
     messages: [
-      { role: "system",  content: SYSTEM_PROMPT },
-      { role: "user",    content: userParts.join("\n\n") },
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: buildUserContent(reel, extraContext) },
     ],
   };
 
-  const resp = await fetch(`${NOUS_BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(45_000),
-  });
+  const maxAttempts = 3;
 
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Nous API error ${resp.status} (${model}): ${text.slice(0, 300)}`);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const resp = await fetch(`${NOUS_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(45_000),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      if (RETRYABLE_STATUS.has(resp.status) && attempt < maxAttempts - 1) {
+        await sleep(1000 * 2 ** attempt);
+        continue;
+      }
+      throw new Error(
+        `Nous API error ${resp.status} (${model}): ${text.slice(0, 300)}`,
+      );
+    }
+
+    const data = (await resp.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+
+    const raw = data.choices?.[0]?.message?.content ?? "";
+    const clean = raw.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
+    const extraction = JSON.parse(clean) as Extraction;
+    return applySourceTier(extraction, sourceTier);
   }
 
-  const data = (await resp.json()) as {
-    choices?: { message?: { content?: string } }[];
-  };
-
-  const raw = data.choices?.[0]?.message?.content ?? "";
-  // Strip markdown fences defensively (some models add them despite json_object)
-  const clean = raw.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
-  return JSON.parse(clean) as Extraction;
+  throw new Error("Nous API request failed");
 };
 
 // ── Public ExtractRecipe port ──────────────────────────────────────────────
@@ -148,24 +194,24 @@ export const makeExtractRecipe = (config: {
   }
 
   // Step 2: tier-0 extraction via Gemini Flash on Nous Portal
+  const tier0Source = reel.firstComment ? "caption+comment" : "caption";
+
   try {
     const extraction = await callNous(
       TIER0_MODEL,
-      reel.caption,
-      reel.hashtags,
+      reel,
       "",
       config.nousApiKey,
+      tier0Source,
     );
 
-    // Step 3: if partial + enriched context available, escalate to Claude Sonnet
-    // EnrichReel is a no-op stub for now so this path never fires in practice.
+    // Step 3: if partial + multimodal context available, escalate to Claude Sonnet
     if (
       extraction.kind === "partial" &&
       config.escalationCap > 0 &&
-      (reel.firstComment ?? reel.transcript ?? reel.onScreenText)
+      (reel.transcript ?? reel.onScreenText)
     ) {
       const extraContext = [
-        reel.firstComment ? `First comment: ${reel.firstComment}` : "",
         reel.transcript   ? `Transcript: ${reel.transcript}`       : "",
         reel.onScreenText ? `On-screen text: ${reel.onScreenText}` : "",
       ].filter(Boolean).join("\n");
@@ -173,14 +219,13 @@ export const makeExtractRecipe = (config: {
       try {
         const escalated = await callNous(
           TIER2_MODEL,
-          reel.caption,
-          reel.hashtags,
+          reel,
           extraContext,
           config.nousApiKey,
+          "multimodal",
         );
         return ok(escalated);
       } catch {
-        // Escalation failed — return the partial result from tier-0
         return ok(extraction);
       }
     }

@@ -25,6 +25,9 @@ export type Config = {
   readonly censusOnly: boolean;         // stop after classify (no write)
 };
 
+export { loadEnrichConfig } from "./enrich/index.ts";
+export type { EnrichConfig } from "./enrich/types.ts";
+
 const int = (val: string | undefined, fallback: number): number => {
   const n = parseInt(val ?? "", 10);
   return isNaN(n) ? fallback : n;
