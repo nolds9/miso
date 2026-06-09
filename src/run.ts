@@ -2,9 +2,10 @@
 // run.ts — CLI entrypoint
 //
 // Usage:
-//   pnpm run          # full pipeline (extract + write to Notion)
-//   pnpm run --dry    # dry run (extract only, no Notion writes)
-//   pnpm census       # classify only — report domain distribution, no writes
+//   pnpm run              # full pipeline (extract + write to Notion)
+//   pnpm run --dry        # dry run (extract only, no Notion writes)
+//   pnpm run -- --verbose # per-reel logs + full partial list in report
+//   pnpm census           # classify only — report domain distribution, no writes
 //
 // dotenv/config MUST be imported first (before any port imports).
 // ---------------------------------------------------------------------------
@@ -26,9 +27,12 @@ import type { RunReport, ReelOutcome } from "./ports.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-const parseArgs = (argv: string[]): { dryRun: boolean; censusOnly: boolean } => ({
+const parseArgs = (
+  argv: string[],
+): { dryRun: boolean; censusOnly: boolean; verbose: boolean } => ({
   dryRun     : argv.includes("--dry") || argv.includes("--dry-run"),
   censusOnly : argv.includes("--census"),
+  verbose    : argv.includes("--verbose") || argv.includes("-v"),
 });
 
 const renderTally = (
@@ -47,10 +51,13 @@ const renderTally = (
   }
 };
 
+const PARTIAL_NOTE_SAMPLE_LIMIT = 15;
+
 const renderReport = (
   report: RunReport,
   dryRun: boolean,
   censusOnly: boolean,
+  verbose: boolean,
 ): string => {
   const lines: string[] = [];
   const hr = "─".repeat(52);
@@ -117,15 +124,25 @@ const renderReport = (
     (o): o is Extract<ReelOutcome, { kind: "partial" }> => o.kind === "partial",
   );
   const withNotes = partials.filter((p) => p.note);
-  if (withNotes.length > 0 && withNotes.length <= 15) {
+  if (withNotes.length > 0) {
     lines.push("");
-    lines.push("  Partial notes (sample):");
-    for (const p of withNotes.slice(0, 15)) {
-      lines.push(`    ${p.note} — ${p.url}`);
+    if (verbose || withNotes.length <= PARTIAL_NOTE_SAMPLE_LIMIT) {
+      lines.push(
+        verbose
+          ? `  Partial notes (${withNotes.length}):`
+          : "  Partial notes (sample):",
+      );
+      const shown = verbose
+        ? withNotes
+        : withNotes.slice(0, PARTIAL_NOTE_SAMPLE_LIMIT);
+      for (const p of shown) {
+        lines.push(`    ${p.note} — ${p.url}`);
+      }
+    } else {
+      lines.push(
+        `  Partial with notes: ${withNotes.length} (re-run with --verbose for full list)`,
+      );
     }
-  } else if (withNotes.length > 15) {
-    lines.push("");
-    lines.push(`  Partial with notes: ${withNotes.length} (re-run with logging for full list)`);
   }
 
   lines.push("");
@@ -141,6 +158,7 @@ const main = async (): Promise<void> => {
   const config = loadConfig({
     dryRun     : args.dryRun,
     censusOnly : args.censusOnly,
+    verbose    : args.verbose,
   });
 
   // Validate required config
@@ -155,7 +173,9 @@ const main = async (): Promise<void> => {
   }
 
   console.log("Miso: Instagram Saved Reels → Notion Recipe Extractor");
-  console.log(`Mode: ${config.censusOnly ? "census" : config.dryRun ? "dry run" : "full"}`);
+  console.log(
+    `Mode: ${config.censusOnly ? "census" : config.dryRun ? "dry run" : "full"}${config.verbose ? " · verbose" : ""}`,
+  );
   console.log(`Export: ${config.exportPath}`);
   console.log("Introspecting Notion vocab…");
 
@@ -191,12 +211,13 @@ const main = async (): Promise<void> => {
       dryRun             : config.dryRun,
       censusOnly         : config.censusOnly,
       exportPath         : config.exportPath,
+      verbose            : config.verbose,
     });
   } finally {
     await enrichFactory.dispose();
   }
 
-  console.log(renderReport(report, config.dryRun, config.censusOnly));
+  console.log(renderReport(report, config.dryRun, config.censusOnly, config.verbose));
   process.exit(report.failed > 0 ? 2 : 0);
 };
 

@@ -95,9 +95,17 @@ Rules:
 // ── Shared OpenAI-compatible caller (Nous Portal endpoint) ─────────────────
 
 const RETRYABLE_STATUS = new Set([429, 502, 503]);
+const BASE_TIMEOUT_MS = 45_000;
+const TIMEOUT_BACKOFF_MS = 30_000;
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
+
+const isTimeoutError = (e: unknown): boolean =>
+  e instanceof Error &&
+  (e.name === "TimeoutError" ||
+    e.name === "AbortError" ||
+    /timeout|aborted/i.test(e.message));
 
 const applySourceTier = (
   extraction: Extraction,
@@ -148,15 +156,26 @@ const callNous = async (
   const maxAttempts = 3;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const resp = await fetch(`${NOUS_BASE_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(45_000),
-    });
+    const timeoutMs = BASE_TIMEOUT_MS + attempt * TIMEOUT_BACKOFF_MS;
+
+    let resp: Response;
+    try {
+      resp = await fetch(`${NOUS_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (e) {
+      if (isTimeoutError(e) && attempt < maxAttempts - 1) {
+        await sleep(1000 * 2 ** attempt);
+        continue;
+      }
+      throw e instanceof Error ? e : new Error(String(e));
+    }
 
     if (!resp.ok) {
       const text = await resp.text();

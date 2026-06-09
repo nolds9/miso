@@ -23,6 +23,7 @@ export type Config = {
   // Run behaviour
   readonly dryRun: boolean;             // skip Notion writes when true
   readonly censusOnly: boolean;         // stop after classify (no write)
+  readonly verbose: boolean;            // log per-reel outcomes + full partial list
 };
 
 export { loadEnrichConfig } from "./enrich/index.ts";
@@ -48,4 +49,5 @@ export const loadConfig = (overrides: Partial<Config> = {}): Config => ({
   escalationCap     : overrides.escalationCap     ?? int(process.env["ESCALATION_CAP"],      1),
   dryRun            : overrides.dryRun            ?? bool(process.env["DRY_RUN"],             false),
   censusOnly        : overrides.censusOnly        ?? bool(process.env["CENSUS_ONLY"],         false),
+  verbose           : overrides.verbose           ?? bool(process.env["VERBOSE"],             false),
 });
