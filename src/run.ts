@@ -199,6 +199,8 @@ const main = async (): Promise<void> => {
       existingSourceUrls : makeExistingSourceUrls(notion, config.notionDataSourceId),
       extractRecipe      : makeExtractRecipe({
         nousApiKey       : config.nousApiKey,
+        tier0Model       : config.tier0Model,
+        tier2Model       : config.tier2Model,
         escalationCap    : config.escalationCap,
       }),
       enrichReel         : enrichReelFromFactory(enrichFactory),

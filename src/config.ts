@@ -12,6 +12,8 @@ export type Config = {
 
   // LLM — single Nous Portal key covers both tiers
   readonly nousApiKey: string;
+  readonly tier0Model: string;          // initial extraction model slug
+  readonly tier2Model: string;          // escalation model slug
 
   // Concurrency
   readonly concurrencyExtract: number;  // tier-0 extract + Notion write pool
@@ -44,6 +46,8 @@ export const loadConfig = (overrides: Partial<Config> = {}): Config => ({
   notionDatabaseId  : overrides.notionDatabaseId  ?? process.env["NOTION_DATABASE_ID"]   ?? process.env["NOTION_PARENT_PAGE_ID"] ?? "",
   notionDataSourceId: overrides.notionDataSourceId ?? process.env["NOTION_DATA_SOURCE_ID"] ?? "",
   nousApiKey        : overrides.nousApiKey        ?? process.env["NOUS_API_KEY"]            ?? "",
+  tier0Model        : overrides.tier0Model        ?? process.env["TIER0_MODEL"]              ?? "google/gemini-3-flash-preview",
+  tier2Model        : overrides.tier2Model        ?? process.env["TIER2_MODEL"]              ?? "anthropic/claude-sonnet-4.6",
   concurrencyExtract: overrides.concurrencyExtract ?? int(process.env["CONCURRENCY_EXTRACT"], 4),
   concurrencyWrite  : overrides.concurrencyWrite  ?? int(process.env["CONCURRENCY_WRITE"],   3),
   escalationCap     : overrides.escalationCap     ?? int(process.env["ESCALATION_CAP"],      1),

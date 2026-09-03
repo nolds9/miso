@@ -17,8 +17,6 @@ import { ok, err } from "../result.ts";
 
 // ── Model slugs ────────────────────────────────────────────────────────────
 
-const TIER0_MODEL    = "google/gemini-3-flash-preview";   // fast + cheap
-const TIER2_MODEL    = "anthropic/claude-sonnet-4.6";     // escalation
 const NOUS_BASE_URL  = "https://inference-api.nousresearch.com/v1";
 
 // ── Cheap heuristic pre-gate ───────────────────────────────────────────────
@@ -205,6 +203,8 @@ const callNous = async (
 
 export const makeExtractRecipe = (config: {
   nousApiKey: string;
+  tier0Model: string;
+  tier2Model: string;
   escalationCap: number;
 }): ExtractRecipe => async (reel: Reel) => {
   // Step 1: heuristic pre-gate (free, no model call)
@@ -217,7 +217,7 @@ export const makeExtractRecipe = (config: {
 
   try {
     const extraction = await callNous(
-      TIER0_MODEL,
+      config.tier0Model,
       reel,
       "",
       config.nousApiKey,
@@ -237,7 +237,7 @@ export const makeExtractRecipe = (config: {
 
       try {
         const escalated = await callNous(
-          TIER2_MODEL,
+          config.tier2Model,
           reel,
           extraContext,
           config.nousApiKey,
